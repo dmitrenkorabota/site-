@@ -6,7 +6,6 @@ const https      = require('https');
 const crypto     = require('crypto');
 const multer     = require('multer');
 const { v2: cloudinary }      = require('cloudinary');
-const { CloudinaryStorage }   = require('multer-storage-cloudinary');
 const { Pool }   = require('pg');
 
 const app  = express();
@@ -104,16 +103,15 @@ function requireAdmin(req, res, next) {
 app.use(express.json());
 app.use(express.static(path.join(__dirname)));
 
-// ── CLOUDINARY UPLOADER FACTORY ──
-function makeUploader(folder) {
-  const storage = new CloudinaryStorage({
-    cloudinary,
-    params: {
-      folder: `lexodessa/${folder}`,
-      resource_type: 'image',
-    },
-  });
-  return multer({ storage, limits: { fileSize: 15 * 1024 * 1024 } });
+// ── UPLOAD ──
+const memUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 15 * 1024 * 1024 },
+});
+
+async function uploadToCloudinary(buffer, mimetype, folder) {
+  const b64 = `data:${mimetype};base64,${buffer.toString('base64')}`;
+  return cloudinary.uploader.upload(b64, { folder: `lexodessa/${folder}` });
 }
 
 // ── PHOTO SLOT HELPERS ──
@@ -231,18 +229,18 @@ app.put('/api/team/:id', requireAdmin, async (req, res) => {
   } catch (e) { console.error(e.message); res.status(500).json({ error: e.message || 'Помилка' }); }
 });
 
-const teamUploader = makeUploader('team');
-app.post('/api/upload/team/:slot', requireAdmin, teamUploader.single('photo'), async (req, res) => {
+app.post('/api/upload/team/:slot', requireAdmin, memUpload.single('photo'), async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT photo_public_id FROM team WHERE id=$1', [req.params.slot]);
     if (rows[0]?.photo_public_id) {
       try { await cloudinary.uploader.destroy(rows[0].photo_public_id); } catch {}
     }
+    const result = await uploadToCloudinary(req.file.buffer, req.file.mimetype, 'team');
     await pool.query(
       'UPDATE team SET photo_url=$1, photo_public_id=$2 WHERE id=$3',
-      [req.file.path, req.file.filename, req.params.slot]
+      [result.secure_url, result.public_id, req.params.slot]
     );
-    res.status(201).json({ success: true, url: req.file.path });
+    res.status(201).json({ success: true, url: result.secure_url });
   } catch (e) { console.error(e.message); res.status(500).json({ error: e.message || 'Помилка' }); }
 });
 
@@ -258,37 +256,37 @@ app.delete('/api/team-photos/:slot', requireAdmin, async (req, res) => {
 });
 
 // ── ABOUT SLOTS ──
-const aboutUploader = makeUploader('about');
 app.get('/api/about-photos', async (req, res) => {
   try { res.json({ photos: await getSlots('about') }); }
-  catch { res.status(500).json({ error: 'Помилка' }); }
+  catch (e) { console.error(e.message); res.status(500).json({ error: e.message }); }
 });
-app.post('/api/upload/about/:slot', requireAdmin, aboutUploader.single('photo'), async (req, res) => {
+app.post('/api/upload/about/:slot', requireAdmin, memUpload.single('photo'), async (req, res) => {
   try {
-    await upsertSlot('about', req.params.slot, req.file.path, req.file.filename);
-    res.status(201).json({ success: true, url: req.file.path });
-  } catch (e) { console.error(e.message); res.status(500).json({ error: e.message || 'Помилка' }); }
+    const r = await uploadToCloudinary(req.file.buffer, req.file.mimetype, 'about');
+    await upsertSlot('about', req.params.slot, r.secure_url, r.public_id);
+    res.status(201).json({ success: true, url: r.secure_url });
+  } catch (e) { console.error(e.message); res.status(500).json({ error: e.message }); }
 });
 app.delete('/api/about-photos/:slot', requireAdmin, async (req, res) => {
   try { await removeSlot('about', req.params.slot); res.json({ success: true }); }
-  catch { res.status(500).json({ error: 'Помилка' }); }
+  catch (e) { console.error(e.message); res.status(500).json({ error: e.message }); }
 });
 
 // ── CASE SLOTS ──
-const caseUploader = makeUploader('cases');
 app.get('/api/case-photos', async (req, res) => {
   try { res.json({ photos: await getSlots('case') }); }
-  catch { res.status(500).json({ error: 'Помилка' }); }
+  catch (e) { console.error(e.message); res.status(500).json({ error: e.message }); }
 });
-app.post('/api/upload/case/:slot', requireAdmin, caseUploader.single('photo'), async (req, res) => {
+app.post('/api/upload/case/:slot', requireAdmin, memUpload.single('photo'), async (req, res) => {
   try {
-    await upsertSlot('case', req.params.slot, req.file.path, req.file.filename);
-    res.status(201).json({ success: true, url: req.file.path });
-  } catch (e) { console.error(e.message); res.status(500).json({ error: e.message || 'Помилка' }); }
+    const r = await uploadToCloudinary(req.file.buffer, req.file.mimetype, 'cases');
+    await upsertSlot('case', req.params.slot, r.secure_url, r.public_id);
+    res.status(201).json({ success: true, url: r.secure_url });
+  } catch (e) { console.error(e.message); res.status(500).json({ error: e.message }); }
 });
 app.delete('/api/case-photos/:slot', requireAdmin, async (req, res) => {
   try { await removeSlot('case', req.params.slot); res.json({ success: true }); }
-  catch { res.status(500).json({ error: 'Помилка' }); }
+  catch (e) { console.error(e.message); res.status(500).json({ error: e.message }); }
 });
 
 // ── ADMIN PAGE ──
