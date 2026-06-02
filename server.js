@@ -305,6 +305,7 @@ initDB()
     });
   })
   .catch(err => {
-    console.error('❌ DB init error:', err.message);
+    console.error('❌ DB init error:', err.message || err);
+    console.error('DATABASE_URL set:', !!process.env.DATABASE_URL);
     process.exit(1);
   });
