@@ -110,8 +110,7 @@ function makeUploader(folder) {
     cloudinary,
     params: {
       folder: `lexodessa/${folder}`,
-      allowed_formats: ['jpg', 'jpeg', 'png', 'webp', 'gif'],
-      transformation: [{ quality: 'auto', fetch_format: 'auto' }],
+      resource_type: 'image',
     },
   });
   return multer({ storage, limits: { fileSize: 15 * 1024 * 1024 } });
@@ -187,21 +186,21 @@ app.get('/api/clients', requireAdmin, async (req, res) => {
       message: r.message, createdAt: r.created_at, status: r.status,
     }));
     res.json({ total: clients.length, clients });
-  } catch { res.status(500).json({ error: 'Помилка' }); }
+  } catch (e) { console.error(e.message); res.status(500).json({ error: e.message || 'Помилка' }); }
 });
 
 app.put('/api/clients/:id', requireAdmin, async (req, res) => {
   try {
     await pool.query('UPDATE leads SET status=$1 WHERE id=$2', [req.body.status || 'new', req.params.id]);
     res.json({ success: true });
-  } catch { res.status(500).json({ error: 'Помилка' }); }
+  } catch (e) { console.error(e.message); res.status(500).json({ error: e.message || 'Помилка' }); }
 });
 
 app.delete('/api/clients/:id', requireAdmin, async (req, res) => {
   try {
     await pool.query('DELETE FROM leads WHERE id=$1', [req.params.id]);
     res.json({ success: true });
-  } catch { res.status(500).json({ error: 'Помилка' }); }
+  } catch (e) { console.error(e.message); res.status(500).json({ error: e.message || 'Помилка' }); }
 });
 
 // ── TEAM ──
@@ -209,7 +208,7 @@ app.get('/api/team', async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM team ORDER BY id');
     res.json({ team: rows.map(r => ({ ...r, photoUrl: r.photo_url })) });
-  } catch { res.status(500).json({ error: 'Помилка' }); }
+  } catch (e) { console.error(e.message); res.status(500).json({ error: e.message || 'Помилка' }); }
 });
 
 app.put('/api/team/:id', requireAdmin, async (req, res) => {
@@ -229,7 +228,7 @@ app.put('/api/team/:id', requireAdmin, async (req, res) => {
     );
     const { rows } = await pool.query('SELECT * FROM team WHERE id=$1', [req.params.id]);
     res.json({ success: true, member: { ...rows[0], photoUrl: rows[0].photo_url } });
-  } catch { res.status(500).json({ error: 'Помилка' }); }
+  } catch (e) { console.error(e.message); res.status(500).json({ error: e.message || 'Помилка' }); }
 });
 
 const teamUploader = makeUploader('team');
@@ -244,7 +243,7 @@ app.post('/api/upload/team/:slot', requireAdmin, teamUploader.single('photo'), a
       [req.file.path, req.file.filename, req.params.slot]
     );
     res.status(201).json({ success: true, url: req.file.path });
-  } catch { res.status(500).json({ error: 'Помилка' }); }
+  } catch (e) { console.error(e.message); res.status(500).json({ error: e.message || 'Помилка' }); }
 });
 
 app.delete('/api/team-photos/:slot', requireAdmin, async (req, res) => {
@@ -255,7 +254,7 @@ app.delete('/api/team-photos/:slot', requireAdmin, async (req, res) => {
     }
     await pool.query('UPDATE team SET photo_url=NULL, photo_public_id=NULL WHERE id=$1', [req.params.slot]);
     res.json({ success: true });
-  } catch { res.status(500).json({ error: 'Помилка' }); }
+  } catch (e) { console.error(e.message); res.status(500).json({ error: e.message || 'Помилка' }); }
 });
 
 // ── ABOUT SLOTS ──
@@ -268,7 +267,7 @@ app.post('/api/upload/about/:slot', requireAdmin, aboutUploader.single('photo'),
   try {
     await upsertSlot('about', req.params.slot, req.file.path, req.file.filename);
     res.status(201).json({ success: true, url: req.file.path });
-  } catch { res.status(500).json({ error: 'Помилка' }); }
+  } catch (e) { console.error(e.message); res.status(500).json({ error: e.message || 'Помилка' }); }
 });
 app.delete('/api/about-photos/:slot', requireAdmin, async (req, res) => {
   try { await removeSlot('about', req.params.slot); res.json({ success: true }); }
@@ -285,7 +284,7 @@ app.post('/api/upload/case/:slot', requireAdmin, caseUploader.single('photo'), a
   try {
     await upsertSlot('case', req.params.slot, req.file.path, req.file.filename);
     res.status(201).json({ success: true, url: req.file.path });
-  } catch { res.status(500).json({ error: 'Помилка' }); }
+  } catch (e) { console.error(e.message); res.status(500).json({ error: e.message || 'Помилка' }); }
 });
 app.delete('/api/case-photos/:slot', requireAdmin, async (req, res) => {
   try { await removeSlot('case', req.params.slot); res.json({ success: true }); }
@@ -294,6 +293,12 @@ app.delete('/api/case-photos/:slot', requireAdmin, async (req, res) => {
 
 // ── ADMIN PAGE ──
 app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, 'admin.html')));
+
+// ── GLOBAL ERROR HANDLER (multer / cloudinary errors) ──
+app.use((err, req, res, next) => {
+  console.error('❌ Upload error:', err.message || err);
+  res.status(500).json({ error: err.message || 'Помилка завантаження' });
+});
 
 // ── START ──
 initDB()
