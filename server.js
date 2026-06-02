@@ -1,18 +1,85 @@
-const express = require('express');
-const path    = require('path');
-const fs      = require('fs');
-const multer  = require('multer');
-const crypto  = require('crypto');
-const https   = require('https');
+require('dotenv').config();
+
+const express    = require('express');
+const path       = require('path');
+const https      = require('https');
+const crypto     = require('crypto');
+const multer     = require('multer');
+const { v2: cloudinary }      = require('cloudinary');
+const { CloudinaryStorage }   = require('multer-storage-cloudinary');
+const { Pool }   = require('pg');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
+// ── CLOUDINARY ──
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key:    process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+// ── DATABASE ──
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: (process.env.DATABASE_URL || '').includes('localhost')
+    ? false
+    : { rejectUnauthorized: false },
+});
+
+async function initDB() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS leads (
+      id BIGINT PRIMARY KEY,
+      name TEXT NOT NULL,
+      phone TEXT NOT NULL,
+      message TEXT DEFAULT '',
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      status TEXT DEFAULT 'new'
+    );
+
+    CREATE TABLE IF NOT EXISTS team (
+      id INTEGER PRIMARY KEY,
+      name TEXT NOT NULL,
+      role TEXT NOT NULL,
+      bio TEXT DEFAULT '',
+      initials TEXT DEFAULT '',
+      photo_url TEXT,
+      photo_public_id TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS photo_slots (
+      prefix TEXT NOT NULL,
+      slot TEXT NOT NULL,
+      url TEXT NOT NULL,
+      public_id TEXT,
+      PRIMARY KEY (prefix, slot)
+    );
+  `);
+
+  const { rows } = await pool.query('SELECT COUNT(*)::int AS cnt FROM team');
+  if (rows[0].cnt === 0) {
+    const defaults = [
+      { id: 1, name: 'Михайло Кравченко', role: 'Керуючий партнер', bio: '20 років досвіду в господарських та цивільних справах. Кандидат юридичних наук.',    initials: 'МК' },
+      { id: 2, name: 'Наталія Шевченко',  role: 'Адвокат',          bio: 'Сімейне право, спадщина, нерухомість. 12 років практики.',                           initials: 'НШ' },
+      { id: 3, name: 'Олег Дорошенко',    role: 'Адвокат',          bio: 'Кримінальний захист, адміністративні справи. 10 років у правоохоронних органах.',     initials: 'ОД' },
+      { id: 4, name: 'Анна Петренко',     role: 'Юрист',            bio: 'Корпоративне право, договірна робота, бізнес-супровід. 8 років досвіду.',             initials: 'АП' },
+    ];
+    for (const m of defaults) {
+      await pool.query(
+        'INSERT INTO team (id,name,role,bio,initials) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING',
+        [m.id, m.name, m.role, m.bio, m.initials]
+      );
+    }
+  }
+}
+
 // ── TELEGRAM ──
-const TG_TOKEN   = process.env.TG_TOKEN   || '8978477738:AAFc67ACMEKds2gOmxxoNvzTQPlPemBXESs';
-const TG_CHAT_ID = process.env.TG_CHAT_ID || '5873169995';
+const TG_TOKEN   = process.env.TG_TOKEN;
+const TG_CHAT_ID = process.env.TG_CHAT_ID;
 
 function sendTelegram(text) {
+  if (!TG_TOKEN || !TG_CHAT_ID) return;
   const body = JSON.stringify({ chat_id: TG_CHAT_ID, text, parse_mode: 'HTML' });
   const req  = https.request({
     hostname: 'api.telegram.org',
@@ -37,165 +104,207 @@ function requireAdmin(req, res, next) {
 app.use(express.json());
 app.use(express.static(path.join(__dirname)));
 
-// ── UPLOAD DIRS ──
-const DIRS = {
-  about: path.join(__dirname, 'uploads', 'about'),
-  cases: path.join(__dirname, 'uploads', 'cases'),
-  team:  path.join(__dirname, 'uploads', 'team'),
-};
-Object.values(DIRS).forEach(d => fs.mkdirSync(d, { recursive: true }));
-
-// ── UPLOAD HELPERS ──
-const imgFilter = (req, file, cb) =>
-  /^image\/(jpeg|jpg|png|webp|gif)$/.test(file.mimetype) ? cb(null, true) : cb(new Error('Images only'));
-
-function makeUploader(dir, nameFn) {
-  return multer({
-    storage: multer.diskStorage({ destination: (req, file, cb) => cb(null, dir), filename: nameFn }),
-    limits: { fileSize: 15 * 1024 * 1024 },
-    fileFilter: imgFilter,
+// ── CLOUDINARY UPLOADER FACTORY ──
+function makeUploader(folder) {
+  const storage = new CloudinaryStorage({
+    cloudinary,
+    params: {
+      folder: `lexodessa/${folder}`,
+      allowed_formats: ['jpg', 'jpeg', 'png', 'webp', 'gif'],
+      transformation: [{ quality: 'auto', fetch_format: 'auto' }],
+    },
   });
+  return multer({ storage, limits: { fileSize: 15 * 1024 * 1024 } });
 }
 
-function clearSlot(dir, name) {
-  fs.readdirSync(dir).filter(f => f.startsWith(name + '.')).forEach(f => {
-    try { fs.unlinkSync(path.join(dir, f)); } catch {}
-  });
-}
-
-function readSlots(dir, pattern) {
+// ── PHOTO SLOT HELPERS ──
+async function getSlots(prefix) {
+  const { rows } = await pool.query('SELECT slot, url FROM photo_slots WHERE prefix=$1', [prefix]);
   const photos = {};
-  fs.readdirSync(dir).filter(f => pattern.test(f)).forEach(f => {
-    const key = f.replace(/\.[^.]+$/, '').split('-').slice(1).join('-');
-    photos[key] = { slot: key, filename: f, url: `/uploads/${path.basename(dir)}/${f}` };
-  });
+  rows.forEach(r => { photos[r.slot] = { slot: r.slot, url: r.url }; });
   return photos;
 }
 
-function slotUploader(dir, prefix) {
-  return makeUploader(dir, (req, file, cb) => {
-    const key = req.params.slot;
-    const ext = path.extname(file.originalname).toLowerCase();
-    clearSlot(dir, `${prefix}-${key}`);
-    cb(null, `${prefix}-${key}${ext}`);
-  });
+async function upsertSlot(prefix, slot, url, publicId) {
+  const { rows } = await pool.query(
+    'SELECT public_id FROM photo_slots WHERE prefix=$1 AND slot=$2', [prefix, slot]
+  );
+  if (rows[0]?.public_id) {
+    try { await cloudinary.uploader.destroy(rows[0].public_id); } catch {}
+  }
+  await pool.query(
+    `INSERT INTO photo_slots (prefix,slot,url,public_id) VALUES ($1,$2,$3,$4)
+     ON CONFLICT (prefix,slot) DO UPDATE SET url=$3, public_id=$4`,
+    [prefix, slot, url, publicId]
+  );
 }
 
-function mountSlots(prefix, dir, pattern) {
-  const up = slotUploader(dir, prefix);
-  app.get(`/api/${prefix}-photos`, (req, res) => res.json({ photos: readSlots(dir, pattern) }));
-  app.post(`/api/upload/${prefix}/:slot`, requireAdmin, up.single('photo'), (req, res) => {
-    if (!req.file) return res.status(400).json({ error: 'Файл не отримано' });
-    res.status(201).json({ success: true, url: `/uploads/${prefix}/${req.file.filename}` });
-  });
-  app.delete(`/api/${prefix}-photos/:slot`, requireAdmin, (req, res) => {
-    clearSlot(dir, `${prefix}-${req.params.slot}`);
-    res.json({ success: true });
-  });
+async function removeSlot(prefix, slot) {
+  const { rows } = await pool.query(
+    'SELECT public_id FROM photo_slots WHERE prefix=$1 AND slot=$2', [prefix, slot]
+  );
+  if (rows[0]?.public_id) {
+    try { await cloudinary.uploader.destroy(rows[0].public_id); } catch {}
+  }
+  await pool.query('DELETE FROM photo_slots WHERE prefix=$1 AND slot=$2', [prefix, slot]);
 }
 
 // ── AUTH ──
 app.post('/api/auth', (req, res) => {
-  const { password } = req.body;
-  if (password === ADMIN_PASS) return res.json({ ok: true, token: ADMIN_TOKEN });
+  if (req.body.password === ADMIN_PASS) return res.json({ ok: true, token: ADMIN_TOKEN });
   res.status(401).json({ error: 'Невірний пароль' });
 });
 
 // ── LEADS ──
-const CLIENTS_FILE = path.join(__dirname, 'clients.json');
-const loadClients  = () => { try { return JSON.parse(fs.readFileSync(CLIENTS_FILE, 'utf8')); } catch { return []; } };
-const saveClients  = (c) => fs.writeFileSync(CLIENTS_FILE, JSON.stringify(c, null, 2));
-let leads = loadClients();
-
-app.post('/api/lead', (req, res) => {
+app.post('/api/lead', async (req, res) => {
   const { name, phone, message } = req.body;
   if (!name || !phone) return res.status(400).json({ error: "Ім'я та телефон обов'язкові" });
-  const lead = { id: Date.now(), name, phone, message: message || '', createdAt: new Date().toISOString(), status: 'new' };
-  leads.push(lead);
-  saveClients(leads);
-  const now = new Date().toLocaleString('uk-UA', { timeZone: 'Europe/Kiev' });
-  sendTelegram(
-    `🔔 <b>Нова заявка з сайту!</b>\n\n` +
-    `👤 <b>Ім'я:</b> ${name}\n` +
-    `📞 <b>Телефон:</b> ${phone}\n` +
-    (message ? `💬 <b>Повідомлення:</b> ${message}\n` : '') +
-    `\n⏰ ${now}`
-  );
-  res.status(201).json({ success: true, message: 'Заявку отримано' });
+  try {
+    await pool.query(
+      'INSERT INTO leads (id,name,phone,message) VALUES ($1,$2,$3,$4)',
+      [Date.now(), name, phone, message || '']
+    );
+    const now = new Date().toLocaleString('uk-UA', { timeZone: 'Europe/Kiev' });
+    sendTelegram(
+      `🔔 <b>Нова заявка з сайту!</b>\n\n` +
+      `👤 <b>Ім'я:</b> ${name}\n` +
+      `📞 <b>Телефон:</b> ${phone}\n` +
+      (message ? `💬 <b>Повідомлення:</b> ${message}\n` : '') +
+      `\n⏰ ${now}`
+    );
+    res.status(201).json({ success: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Помилка сервера' });
+  }
 });
 
-app.get('/api/clients', (req, res) => res.json({ total: leads.length, clients: [...leads].reverse() }));
-
-app.put('/api/clients/:id', requireAdmin, (req, res) => {
-  const c = leads.find(l => l.id === +req.params.id);
-  if (!c) return res.status(404).json({ error: 'Не знайдено' });
-  c.status = req.body.status || 'new';
-  saveClients(leads);
-  res.json({ success: true, client: c });
+app.get('/api/clients', requireAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM leads ORDER BY created_at DESC');
+    const clients = rows.map(r => ({
+      id: Number(r.id), name: r.name, phone: r.phone,
+      message: r.message, createdAt: r.created_at, status: r.status,
+    }));
+    res.json({ total: clients.length, clients });
+  } catch { res.status(500).json({ error: 'Помилка' }); }
 });
 
-app.delete('/api/clients/:id', requireAdmin, (req, res) => {
-  const idx = leads.findIndex(l => l.id === +req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Не знайдено' });
-  leads.splice(idx, 1);
-  saveClients(leads);
-  res.json({ success: true });
+app.put('/api/clients/:id', requireAdmin, async (req, res) => {
+  try {
+    await pool.query('UPDATE leads SET status=$1 WHERE id=$2', [req.body.status || 'new', req.params.id]);
+    res.json({ success: true });
+  } catch { res.status(500).json({ error: 'Помилка' }); }
+});
+
+app.delete('/api/clients/:id', requireAdmin, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM leads WHERE id=$1', [req.params.id]);
+    res.json({ success: true });
+  } catch { res.status(500).json({ error: 'Помилка' }); }
 });
 
 // ── TEAM ──
-const TEAM_FILE = path.join(__dirname, 'team.json');
-const DEFAULT_TEAM = [
-  { id: 1, name: 'Михайло Кравченко', role: 'Керуючий партнер', bio: '20 років досвіду в господарських та цивільних справах. Кандидат юридичних наук.', initials: 'МК' },
-  { id: 2, name: 'Наталія Шевченко',  role: 'Адвокат',          bio: 'Сімейне право, спадщина, нерухомість. 12 років практики.', initials: 'НШ' },
-  { id: 3, name: 'Олег Дорошенко',    role: 'Адвокат',          bio: 'Кримінальний захист, адміністративні справи. 10 років у правоохоронних органах.', initials: 'ОД' },
-  { id: 4, name: 'Анна Петренко',     role: 'Юрист',            bio: 'Корпоративне право, договірна робота, бізнес-супровід. 8 років досвіду.', initials: 'АП' },
-];
-const loadTeam = () => { try { return JSON.parse(fs.readFileSync(TEAM_FILE, 'utf8')); } catch { return [...DEFAULT_TEAM]; } };
-const saveTeam = (t) => fs.writeFileSync(TEAM_FILE, JSON.stringify(t, null, 2));
-
-app.get('/api/team', (req, res) => {
-  const team = loadTeam();
-  const result = team.map(m => {
-    const photo = fs.readdirSync(DIRS.team).find(f => new RegExp(`^team-${m.id}\\.[a-z]+$`, 'i').test(f));
-    return { ...m, photoUrl: photo ? `/uploads/team/${photo}` : null };
-  });
-  res.json({ team: result });
+app.get('/api/team', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM team ORDER BY id');
+    res.json({ team: rows.map(r => ({ ...r, photoUrl: r.photo_url })) });
+  } catch { res.status(500).json({ error: 'Помилка' }); }
 });
 
-app.put('/api/team/:id', requireAdmin, (req, res) => {
-  const team = loadTeam();
-  const idx  = team.findIndex(m => m.id === +req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Not found' });
-  const { name, role, bio } = req.body;
-  if (name !== undefined) {
-    team[idx].name     = name;
-    team[idx].initials = name.trim().split(/\s+/).map(w => w[0]).join('').toUpperCase().slice(0, 2);
-  }
-  if (role !== undefined) team[idx].role = role;
-  if (bio  !== undefined) team[idx].bio  = bio;
-  saveTeam(team);
-  res.json({ success: true, member: team[idx] });
+app.put('/api/team/:id', requireAdmin, async (req, res) => {
+  try {
+    const { name, role, bio } = req.body;
+    const initials = name
+      ? name.trim().split(/\s+/).map(w => w[0]).join('').toUpperCase().slice(0, 2)
+      : null;
+    await pool.query(
+      `UPDATE team
+       SET name     = COALESCE($1, name),
+           role     = COALESCE($2, role),
+           bio      = COALESCE($3, bio),
+           initials = COALESCE($4, initials)
+       WHERE id = $5`,
+      [name || null, role || null, bio ?? null, initials, req.params.id]
+    );
+    const { rows } = await pool.query('SELECT * FROM team WHERE id=$1', [req.params.id]);
+    res.json({ success: true, member: { ...rows[0], photoUrl: rows[0].photo_url } });
+  } catch { res.status(500).json({ error: 'Помилка' }); }
 });
 
-const teamPhotoUp = slotUploader(DIRS.team, 'team');
-app.post('/api/upload/team/:slot', requireAdmin, teamPhotoUp.single('photo'), (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'Файл не отримано' });
-  res.status(201).json({ success: true, url: `/uploads/team/${req.file.filename}` });
-});
-app.delete('/api/team-photos/:slot', requireAdmin, (req, res) => {
-  clearSlot(DIRS.team, `team-${req.params.slot}`);
-  res.json({ success: true });
+const teamUploader = makeUploader('team');
+app.post('/api/upload/team/:slot', requireAdmin, teamUploader.single('photo'), async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT photo_public_id FROM team WHERE id=$1', [req.params.slot]);
+    if (rows[0]?.photo_public_id) {
+      try { await cloudinary.uploader.destroy(rows[0].photo_public_id); } catch {}
+    }
+    await pool.query(
+      'UPDATE team SET photo_url=$1, photo_public_id=$2 WHERE id=$3',
+      [req.file.path, req.file.filename, req.params.slot]
+    );
+    res.status(201).json({ success: true, url: req.file.path });
+  } catch { res.status(500).json({ error: 'Помилка' }); }
 });
 
-// ── ABOUT & CASE SLOTS ──
-mountSlots('about', DIRS.about, /^about-[1-4]\.[a-z]+$/i);
-mountSlots('case',  DIRS.cases, /^case-[123]\.[a-z]+$/i);
+app.delete('/api/team-photos/:slot', requireAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT photo_public_id FROM team WHERE id=$1', [req.params.slot]);
+    if (rows[0]?.photo_public_id) {
+      try { await cloudinary.uploader.destroy(rows[0].photo_public_id); } catch {}
+    }
+    await pool.query('UPDATE team SET photo_url=NULL, photo_public_id=NULL WHERE id=$1', [req.params.slot]);
+    res.json({ success: true });
+  } catch { res.status(500).json({ error: 'Помилка' }); }
+});
+
+// ── ABOUT SLOTS ──
+const aboutUploader = makeUploader('about');
+app.get('/api/about-photos', async (req, res) => {
+  try { res.json({ photos: await getSlots('about') }); }
+  catch { res.status(500).json({ error: 'Помилка' }); }
+});
+app.post('/api/upload/about/:slot', requireAdmin, aboutUploader.single('photo'), async (req, res) => {
+  try {
+    await upsertSlot('about', req.params.slot, req.file.path, req.file.filename);
+    res.status(201).json({ success: true, url: req.file.path });
+  } catch { res.status(500).json({ error: 'Помилка' }); }
+});
+app.delete('/api/about-photos/:slot', requireAdmin, async (req, res) => {
+  try { await removeSlot('about', req.params.slot); res.json({ success: true }); }
+  catch { res.status(500).json({ error: 'Помилка' }); }
+});
+
+// ── CASE SLOTS ──
+const caseUploader = makeUploader('cases');
+app.get('/api/case-photos', async (req, res) => {
+  try { res.json({ photos: await getSlots('case') }); }
+  catch { res.status(500).json({ error: 'Помилка' }); }
+});
+app.post('/api/upload/case/:slot', requireAdmin, caseUploader.single('photo'), async (req, res) => {
+  try {
+    await upsertSlot('case', req.params.slot, req.file.path, req.file.filename);
+    res.status(201).json({ success: true, url: req.file.path });
+  } catch { res.status(500).json({ error: 'Помилка' }); }
+});
+app.delete('/api/case-photos/:slot', requireAdmin, async (req, res) => {
+  try { await removeSlot('case', req.params.slot); res.json({ success: true }); }
+  catch { res.status(500).json({ error: 'Помилка' }); }
+});
 
 // ── ADMIN PAGE ──
 app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, 'admin.html')));
 
-app.listen(PORT, () => {
-  console.log(`\n✅  http://localhost:${PORT}`);
-  console.log(`🔑  Адмін: http://localhost:${PORT}/admin`);
-  console.log(`🔐  Пароль: ${ADMIN_PASS}  (змінити: ADMIN_PASS=новий_пароль node server.js)\n`);
-});
+// ── START ──
+initDB()
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`\n✅  http://localhost:${PORT}`);
+      console.log(`🔑  Адмін: http://localhost:${PORT}/admin`);
+      console.log(`🔐  Пароль: ${ADMIN_PASS}\n`);
+    });
+  })
+  .catch(err => {
+    console.error('❌ DB init error:', err.message);
+    process.exit(1);
+  });

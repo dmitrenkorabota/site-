@@ -170,7 +170,7 @@ img { display: block; max-width: 100%; }
 .hero {
   position: relative; min-height: 100vh;
   display: flex; align-items: center;
-  background: url('/uploads/hero/hero-bg.jpg') center/cover no-repeat;
+  background: url('/assets/hero-bg.jpg') center/cover no-repeat;
 }
 @media (min-width: 769px) { .hero { background-attachment: fixed; } }
 .hero__overlay {
