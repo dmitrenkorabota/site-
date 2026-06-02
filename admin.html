@@ -541,7 +541,7 @@ function fmtDate(iso) {
 
 async function loadLeads() {
   try {
-    const { clients } = await fetch('/api/clients').then(r => r.json());
+    const { clients } = await fetch('/api/clients', { headers: authHeaders() }).then(r => r.json());
     const total  = clients.length;
     const newCnt = clients.filter(c => c.status === 'new').length;
     const workCnt= clients.filter(c => c.status === 'in-progress').length;
