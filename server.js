@@ -111,7 +111,13 @@ const memUpload = multer({
 
 async function uploadToCloudinary(buffer, mimetype, folder) {
   const b64 = `data:${mimetype};base64,${buffer.toString('base64')}`;
-  return cloudinary.uploader.upload(b64, { folder: `lexodessa/${folder}` });
+  const result = await cloudinary.uploader.upload(b64, { folder: `lexodessa/${folder}` });
+  if (result?.error) throw new Error(result.error.message || JSON.stringify(result.error));
+  return result;
+}
+
+function errMsg(e) {
+  return e?.message || e?.error?.message || JSON.stringify(e);
 }
 
 // ── PHOTO SLOT HELPERS ──
@@ -241,7 +247,7 @@ app.post('/api/upload/team/:slot', requireAdmin, memUpload.single('photo'), asyn
       [result.secure_url, result.public_id, req.params.slot]
     );
     res.status(201).json({ success: true, url: result.secure_url });
-  } catch (e) { console.error(e.message); res.status(500).json({ error: e.message || 'Помилка' }); }
+  } catch (e) { console.error('team upload:', errMsg(e)); res.status(500).json({ error: errMsg(e) }); }
 });
 
 app.delete('/api/team-photos/:slot', requireAdmin, async (req, res) => {
@@ -265,7 +271,7 @@ app.post('/api/upload/about/:slot', requireAdmin, memUpload.single('photo'), asy
     const r = await uploadToCloudinary(req.file.buffer, req.file.mimetype, 'about');
     await upsertSlot('about', req.params.slot, r.secure_url, r.public_id);
     res.status(201).json({ success: true, url: r.secure_url });
-  } catch (e) { console.error(e.message); res.status(500).json({ error: e.message }); }
+  } catch (e) { console.error('about upload:', errMsg(e)); res.status(500).json({ error: errMsg(e) }); }
 });
 app.delete('/api/about-photos/:slot', requireAdmin, async (req, res) => {
   try { await removeSlot('about', req.params.slot); res.json({ success: true }); }
@@ -282,7 +288,7 @@ app.post('/api/upload/case/:slot', requireAdmin, memUpload.single('photo'), asyn
     const r = await uploadToCloudinary(req.file.buffer, req.file.mimetype, 'cases');
     await upsertSlot('case', req.params.slot, r.secure_url, r.public_id);
     res.status(201).json({ success: true, url: r.secure_url });
-  } catch (e) { console.error(e.message); res.status(500).json({ error: e.message }); }
+  } catch (e) { console.error('case upload:', errMsg(e)); res.status(500).json({ error: errMsg(e) }); }
 });
 app.delete('/api/case-photos/:slot', requireAdmin, async (req, res) => {
   try { await removeSlot('case', req.params.slot); res.json({ success: true }); }
