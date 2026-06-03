@@ -304,7 +304,13 @@ initDB()
     app.listen(PORT, () => {
       console.log(`\n✅  http://localhost:${PORT}`);
       console.log(`🔑  Адмін: http://localhost:${PORT}/admin`);
-      console.log(`🔐  Пароль: ${ADMIN_PASS}\n`);
+      console.log(`🔐  Пароль: ${ADMIN_PASS}`);
+      console.log(`📦  DATABASE_URL:          ${process.env.DATABASE_URL ? '✅' : '❌ НЕ ВСТАНОВЛЕНО'}`);
+      console.log(`📸  CLOUDINARY_CLOUD_NAME: ${process.env.CLOUDINARY_CLOUD_NAME ? '✅ ' + process.env.CLOUDINARY_CLOUD_NAME : '❌ НЕ ВСТАНОВЛЕНО'}`);
+      console.log(`📸  CLOUDINARY_API_KEY:    ${process.env.CLOUDINARY_API_KEY ? '✅' : '❌ НЕ ВСТАНОВЛЕНО'}`);
+      console.log(`📸  CLOUDINARY_API_SECRET: ${process.env.CLOUDINARY_API_SECRET ? '✅' : '❌ НЕ ВСТАНОВЛЕНО'}`);
+      console.log(`✈️   TG_TOKEN:              ${process.env.TG_TOKEN ? '✅' : '❌ НЕ ВСТАНОВЛЕНО'}`);
+      console.log(`✈️   TG_CHAT_ID:            ${process.env.TG_CHAT_ID ? '✅ ' + process.env.TG_CHAT_ID : '❌ НЕ ВСТАНОВЛЕНО'}\n`);
     });
   })
   .catch(err => {
