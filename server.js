@@ -42,7 +42,9 @@ async function uploadToMinio(buffer, mimetype, folder) {
   const ext = (mimetype.split('/')[1] || 'jpg').replace('jpeg', 'jpg');
   const objectName = `${folder}/${Date.now()}.${ext}`;
   await minioClient.putObject(MINIO_BUCKET, objectName, buffer, buffer.length, { 'Content-Type': mimetype });
-  return { url: `${MINIO_PUBLIC_URL}/${objectName}`, public_id: objectName };
+  const url = `${MINIO_PUBLIC_URL}/${MINIO_BUCKET}/${objectName}`;
+  console.log('✅ Uploaded to MinIO:', url);
+  return { url, public_id: objectName };
 }
 
 async function deleteFromMinio(objectName) {
