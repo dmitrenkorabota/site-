@@ -276,8 +276,10 @@ app.use((err, req, res, next) => {
 });
 
 // ── START ──
-Promise.all([initDB(), initMinio()])
-  .then(() => {
+Promise.all([
+  initDB(),
+  initMinio().catch(e => console.error('⚠️  MinIO init error (non-fatal):', e.message)),
+]).then(() => {
     app.listen(PORT, () => {
       console.log(`\n✅  http://localhost:${PORT}`);
       console.log(`🔑  Адмін: http://localhost:${PORT}/admin`);
