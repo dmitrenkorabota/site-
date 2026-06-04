@@ -22,7 +22,7 @@ const minioClient = new Minio.Client({
   secretKey: process.env.MINIO_SECRET_KEY,
 });
 
-const MINIO_PUBLIC_URL = `https://${process.env.MINIO_ENDPOINT}/${MINIO_BUCKET}`;
+const MINIO_PUBLIC_URL = process.env.MINIO_PUBLIC_URL || `https://${process.env.MINIO_ENDPOINT}/${MINIO_BUCKET}`;
 
 async function initMinio() {
   const exists = await minioClient.bucketExists(MINIO_BUCKET);
