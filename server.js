@@ -25,6 +25,10 @@ const minioClient = new Minio.Client({
 const MINIO_PUBLIC_URL = process.env.MINIO_PUBLIC_URL || `https://${process.env.MINIO_ENDPOINT}/${MINIO_BUCKET}`;
 
 async function initMinio() {
+  if (!process.env.MINIO_ENDPOINT || !process.env.MINIO_ACCESS_KEY) {
+    console.log('⚠️  MinIO не налаштовано — пропускаємо');
+    return;
+  }
   const exists = await minioClient.bucketExists(MINIO_BUCKET);
   if (!exists) await minioClient.makeBucket(MINIO_BUCKET);
   const policy = JSON.stringify({
